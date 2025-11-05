@@ -1,4 +1,4 @@
-  name: weekly-agent
+name: weekly-agent
 
 on:
   schedule:
