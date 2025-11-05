@@ -1,58 +1,222 @@
-name: weekly-agent
+import os, json, feedparser, requests, smtplib, time
+from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
+import openai
 
-on:
-  schedule:
-    - cron: '0 1 * * MON'   # Coleta: Domingo 22:00 BRT == Segunda 01:00 UTC
-    - cron: '0 16 * * MON'  # Resumo/Envio: Segunda 13:00 BRT == 16:00 UTC
-  workflow_dispatch:
+# ====================== CONFIG ======================
+TOPICS = {
+    "Marketing": ["marketing digital","performance marketing","ads","growth","copywriting","CAC","ROI","mídia"],
+    "IA": ["inteligência artificial","machine learning","IA","LLM","GPT","openai","modelo generativo","chatbot"],
+    "Tecnologia": ["tecnologia","startup","software","cloud","saas","big tech","apple","google","microsoft"],
+    "Mercado Imobiliário": ["imobiliário","imóveis","construtora","loteamento","incorporadora","locação","corretor"],
+    "Brasil": ["Brasil","economia brasileira","política","governo","Congresso","Senado","BCB","Câmara"],
+    "Mercado Financeiro": ["mercado financeiro","bolsa","renda fixa","juros","IPCA","inflação","Ibovespa","ações"]
+}
 
-jobs:
-  collect:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Instalar dependências
-        run: |
-          echo "openai==0.28.1" > requirements.txt
-          echo "feedparser==6.0.11" >> requirements.txt
-          echo "requests==2.32.3" >> requirements.txt
-          pip install -r requirements.txt
-      - name: Coletar notícias (últimos 7 dias)
-        env:
-          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-        run: python agent_weekly.py --collect-only
-      - name: Salvar artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: collected
-          path: collected.json
+RSS_SOURCES = [
+    "https://g1.globo.com/rss/g1/economia/",
+    "https://valor.globo.com/rss/",
+    "https://www.infomoney.com.br/feed/",
+    "https://tecnoblog.net/feed/",
+    "https://canaltech.com.br/rss/",
+    "https://feeds.feedburner.com/MarketingLand"
+]
+# ====================================================
 
-  summarize_and_send:
-    runs-on: ubuntu-latest
-    needs: collect
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: collected
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Instalar dependências
-        run: |
-          echo "openai==0.28.1" > requirements.txt
-          echo "feedparser==6.0.11" >> requirements.txt
-          echo "requests==2.32.3" >> requirements.txt
-          pip install -r requirements.txt
-      - name: Resumir e enviar por e-mail
-        env:
-          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: python agent_weekly.py --summarize-and-send collected.json
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def fetch_rss_items():
+    items = []
+    for url in RSS_SOURCES:
+        try:
+            feed = feedparser.parse(url)
+            for e in feed.entries:
+                items.append({
+                    "title": e.get("title"),
+                    "link": e.get("link"),
+                    "published": e.get("published", ""),
+                    "summary": e.get("summary", "")
+                })
+        except Exception as ex:
+            print(f"[WARN] RSS erro {url}: {ex}")
+    return items
+
+def fetch_newsapi(query, api_key, from_days=7, page_size=25, lang="pt"):
+    if not api_key: 
+        return []
+    url = "https://newsapi.org/v2/everything"
+    since = (datetime.utcnow() - timedelta(days=from_days)).isoformat()
+    params = {"q": query, "apiKey": api_key, "from": since, "pageSize": page_size, "language": lang, "sortBy": "publishedAt"}
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code == 200:
+            arts = r.json().get("articles", [])
+            return [{
+                "title": a.get("title"),
+                "link": a.get("url"),
+                "published": a.get("publishedAt"),
+                "summary": a.get("description") or ""
+            } for a in arts]
+        else:
+            print("[WARN] NewsAPI status", r.status_code, r.text[:200])
+    except Exception as ex:
+        print("[WARN] NewsAPI erro:", ex)
+    return []
+
+def dedupe(items):
+    seen, out = set(), []
+    for it in items:
+        key = (it.get("title") or "") + (it.get("link") or "")
+        if key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
+
+# ----- IA classifier -----
+def classify_by_topic(items):
+    openai.api_key = os.getenv("OPENAI_KEY")
+    topics = list(TOPICS.keys())
+    result = {t: [] for t in topics}
+
+    print(f"[INFO] Classificando {len(items)} notícias com IA...")
+
+    for i, it in enumerate(items[:80]):  # limite opcional pra performance
+        text = (it.get("title") or "") + " " + (it.get("summary") or "")
+        if not text.strip():
+            continue
+        prompt = (
+            f"Classifique o texto abaixo em uma destas categorias: {', '.join(topics)}.\n"
+            f"Retorne apenas o nome exato da categoria.\n\n"
+            f"TEXTO:\n{text[:1000]}"
+        )
+        try:
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0
+            )
+            category = resp.choices[0].message.content.strip()
+            if category in result:
+                result[category].append(it)
+            else:
+                result["Brasil"].append(it)
+        except Exception as e:
+            print(f"[WARN] Erro ao classificar item {i}: {e}")
+            result["Brasil"].append(it)
+
+    # log do resumo da classificação
+    counts = ", ".join([f"{t}({len(result[t])})" for t in topics])
+    print(f"[INFO] Classificação final: {counts}")
+
+    return result
+
+# ----- OpenAI summarize with retry -----
+def summarize_topic(topic, articles, max_articles=6):
+    if not articles:
+        return f"Nenhuma notícia relevante encontrada para {topic} nos últimos 7 dias."
+    prompt = (
+        f"Crie um resumo executivo em PT-BR sobre {topic} citando as notícias mais relevantes dos últimos 7 dias.\n"
+        f"Formato:\n"
+        f"1) TOP 5: TÍTULO + LINK + 1 frase de contexto.\n"
+        f"2) 3 insights acionáveis.\n"
+        f"3) 1 headline curta para post.\n\n"
+        f"Notícias:\n"
+    )
+    for a in articles[:max_articles]:
+        prompt += f"- {a.get('title')}\n  {a.get('link')}\n"
+    prompt += "\nAgora gere o resumo, direto e claro."
+
+    models = ["gpt-4o-mini", "gpt-3.5-turbo"]
+    for model_name in models:
+        for attempt in range(3):
+            try:
+                resp = openai.ChatCompletion.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=700,
+                    temperature=0.2,
+                )
+                print(f"[INFO] {topic}: {resp.usage.total_tokens} tokens usados ({model_name})")
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"[WARN] Erro com {model_name} ({attempt+1}/3): {e}")
+                time.sleep(5)
+    return f"[ERRO] Não foi possível gerar o resumo para {topic} após múltiplas tentativas."
+
+def build_email_html(by_topic, summaries):
+    html_sections = []
+    for topic in by_topic:
+        count = len(by_topic[topic])
+        summary = summaries.get(topic, "[Resumo não disponível]")
+        html_sections.append(f"<h2>{topic} — {count} notícias</h2><pre style='white-space:pre-wrap'>{summary}</pre>")
+    html = "<html><body>"
+    html += "<h1>Resumo semanal — Marketing · IA · Tecnologia · Imobiliário · Brasil · Financeiro</h1>"
+    html += "".join(html_sections)
+    html += f"<hr><p>🕒 Execução automática concluída com sucesso — gerado em {utc_now_iso()}</p>"
+    html += "</body></html>"
+    return html
+
+def send_email(subject, html_body, smtp_host, smtp_port, smtp_user, smtp_pass, to_email):
+    msg = MIMEText(html_body, "html", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = to_email
+    try:
+        s = smtplib.SMTP(smtp_host, int(smtp_port))
+        s.starttls()
+        s.login(smtp_user, smtp_pass)
+        s.sendmail(smtp_user, [to_email], msg.as_string())
+        s.quit()
+        print("[OK] Email enviado com sucesso.")
+    except Exception as e:
+        print(f"[ERRO] Falha ao enviar e-mail: {e}")
+
+def collect(from_days=7):
+    rss_items = fetch_rss_items()
+    news_items = []
+    news_key = os.getenv("NEWSAPI_KEY")
+    if news_key:
+        for topic in TOPICS.keys():
+            news_items += fetch_newsapi(topic, news_key, from_days=from_days)
+    all_items = dedupe(rss_items + news_items)
+    with open("collected.json","w",encoding="utf-8") as f:
+        json.dump({"collected_at": utc_now_iso(), "items": all_items}, f, ensure_ascii=False, indent=2)
+    print(f"[OK] Coletados {len(all_items)} itens em collected.json")
+
+def summarize_and_send(collected_path="collected.json"):
+    with open(collected_path,"r",encoding="utf-8") as f:
+        data = json.load(f)
+    items = data.get("items", [])
+    by_topic = classify_by_topic(items)
+    openai.api_key = os.getenv("OPENAI_KEY")
+    summaries = {t: summarize_topic(t, by_topic[t]) for t in by_topic}
+    html = build_email_html(by_topic, summaries)
+    send_email(
+        subject="Resumo semanal — Marketing/IA/Tecnologia/Imobiliário/Brasil/Financeiro",
+        html_body=html,
+        smtp_host=os.getenv("SMTP_HOST","smtp.gmail.com"),
+        smtp_port=os.getenv("SMTP_PORT","587"),
+        smtp_user=os.getenv("SMTP_USER"),
+        smtp_pass=os.getenv("SMTP_PASS"),
+        to_email=os.getenv("TO_EMAIL") or os.getenv("SMTP_USER")
+    )
+    with open("last_summary.json","w",encoding="utf-8") as f:
+        json.dump({"generated_at": utc_now_iso(), "summaries": summaries}, f, ensure_ascii=False, indent=2)
+    print("[OK] Email enviado e last_summary.json salvo.")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--collect-only", action="store_true", help="Coleta e salva collected.json")
+    parser.add_argument("--summarize-and-send", nargs="?", const="collected.json", help="Gera resumo e envia email a partir do arquivo")
+    args = parser.parse_args()
+
+    if args.collect_only:
+        collect(from_days=7)
+    elif args.summarize_and_send:
+        summarize_and_send(args.summarize_and_send)
+    else:
+        collect(from_days=7)
+        summarize_and_send("collected.json")
