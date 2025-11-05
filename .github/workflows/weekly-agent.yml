@@ -14,7 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: echo "openai==0.28.1\nfeedparser==6.0.11\nrequests==2.32.3" > requirements.txt
+      - run: |
+          echo "openai==0.28.1" > requirements.txt
+          echo "feedparser==6.0.11" >> requirements.txt
+          echo "requests==2.32.3" >> requirements.txt
       - run: pip install -r requirements.txt
       - name: Coletar notícias (últimos 7 dias)
         env:
@@ -37,7 +40,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: echo "openai==0.28.1\nfeedparser==6.0.11\nrequests==2.32.3" > requirements.txt
+      - run: |
+          echo "openai==0.28.1" > requirements.txt
+          echo "feedparser==6.0.11" >> requirements.txt
+          echo "requests==2.32.3" >> requirements.txt
       - run: pip install -r requirements.txt
       - name: Resumir e enviar por e-mail
         env:
