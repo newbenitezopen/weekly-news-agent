@@ -1,0 +1,58 @@
+name: weekly-agent
+
+on:
+  schedule:
+    - cron: '0 1 * * MON'   # Coleta: Domingo 22:00 BRT == Segunda 01:00 UTC
+    - cron: '0 16 * * MON'  # Resumo/Envio: Segunda 13:00 BRT == 16:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  collect:
+    if: github.event_name == 'schedule' && contains(github.event.schedule, 'MON') && github.event.schedule == '0 1 * * MON'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: echo "openai==0.28.1
+feedparser==6.0.11
+requests==2.32.3" > requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Coletar notícias (últimos 7 dias)
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        run: |
+          python agent_weekly.py --collect-only
+      - name: Salvar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected
+          path: collected.json
+
+  summarize_and_send:
+    if: github.event_name == 'schedule' && contains(github.event.schedule, 'MON') && github.event.schedule == '0 16 * * MON'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: collected
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: echo "openai==0.28.1
+feedparser==6.0.11
+requests==2.32.3" > requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Resumir e enviar por e-mail
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL:  ${{ secrets.TO_EMAIL }}
+        run: |
+          python agent_weekly.py --summarize-and-send collected.json
