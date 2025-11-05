@@ -1,4 +1,4 @@
-name: weekly-agent
+  name: weekly-agent
 
 on:
   schedule:
@@ -14,11 +14,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: |
+      - name: Instalar dependências
+        run: |
           echo "openai==0.28.1" > requirements.txt
           echo "feedparser==6.0.11" >> requirements.txt
           echo "requests==2.32.3" >> requirements.txt
-      - run: pip install -r requirements.txt
+          pip install -r requirements.txt
       - name: Coletar notícias (últimos 7 dias)
         env:
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
@@ -40,11 +41,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: |
+      - name: Instalar dependências
+        run: |
           echo "openai==0.28.1" > requirements.txt
           echo "feedparser==6.0.11" >> requirements.txt
           echo "requests==2.32.3" >> requirements.txt
-      - run: pip install -r requirements.txt
+          pip install -r requirements.txt
       - name: Resumir e enviar por e-mail
         env:
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
